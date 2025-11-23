@@ -12,6 +12,12 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // WebSocket server (has its own configuration)
+    "websocket-server/**",
+    // Other ignores
+    "node_modules/**",
+    ".cache/**",
+    "dist/**",
   ]),
 ]);
 
