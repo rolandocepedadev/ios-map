@@ -20,6 +20,7 @@ export default function Home() {
     scale: 0,
     move: false,
     server: false,
+    renderer: "",
     ready: false,
   });
   const [militaryFeatures, setMilitaryFeatures] = useState<MilitaryFeature[]>(
@@ -56,6 +57,7 @@ export default function Home() {
       scale: Number.isFinite(n) && n > 0 ? n : 0,
       move: p.get("move") === "1",
       server: p.get("source") === "server",
+      renderer: p.get("renderer") ?? "",
       ready: true,
     });
   }, []);
@@ -180,6 +182,7 @@ export default function Home() {
             demoScale={demo.scale}
             demoMove={demo.move}
             demoServer={demo.server}
+            demoRenderer={demo.renderer}
           />
         )}
 

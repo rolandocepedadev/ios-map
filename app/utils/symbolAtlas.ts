@@ -30,6 +30,8 @@ export const ATLAS_CELL = 64;
 export interface SymbolAtlas {
   /** PNG data URL suitable for the WebGL `icon-src` style property. */
   dataUrl: string;
+  /** The rendered atlas canvas, for direct (synchronous) WebGL texture upload. */
+  canvas: HTMLCanvasElement;
   /** Side length of a single sprite cell, in pixels. */
   cell: number;
   /** Full atlas texture dimensions. */
@@ -150,6 +152,7 @@ export function buildSymbolAtlas(): SymbolAtlas {
 
   return {
     dataUrl: canvas.toDataURL("image/png"),
+    canvas,
     cell,
     width: canvas.width,
     height: canvas.height,

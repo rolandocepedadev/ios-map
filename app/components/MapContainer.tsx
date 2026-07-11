@@ -8,7 +8,7 @@ import { fromLonLat } from "ol/proj";
 import { defaults as defaultControls } from "ol/control";
 import { apply } from "ol-mapbox-style";
 import VectorLayer from "ol/layer/Vector";
-import WebGLPointsLayer from "ol/layer/WebGLPoints";
+import Layer from "ol/layer/Layer";
 import VectorSource from "ol/source/Vector";
 import Feature from "ol/Feature";
 import Point from "ol/geom/Point";
@@ -18,6 +18,7 @@ import { createMilStdIcon } from "../utils/milStd2525";
 import {
   buildDemoLayer,
   buildServerDrivenLayer,
+  buildCustomDemoLayer,
   type DemoLayer,
   type Selection,
 } from "../utils/webglPointsDemo";
@@ -39,6 +40,11 @@ interface MapContainerProps {
    * Worker (Phase 3) instead of the client-side simulation.
    */
   demoServer?: boolean;
+  /**
+   * When "custom" (via `?renderer=custom`), use the custom WebGL renderer with GPU-side
+   * interpolation instead of the stock WebGLPointsLayer.
+   */
+  demoRenderer?: string;
 }
 
 const MapContainer = memo(function MapContainer({
@@ -46,12 +52,11 @@ const MapContainer = memo(function MapContainer({
   demoScale = 0,
   demoMove = false,
   demoServer = false,
+  demoRenderer = "",
 }: MapContainerProps) {
   const mapRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<Map | null>(null);
-  const militaryLayerRef = useRef<
-    VectorLayer<VectorSource> | WebGLPointsLayer<VectorSource> | null
-  >(null);
+  const militaryLayerRef = useRef<Layer | null>(null);
   const demoRef = useRef<DemoLayer | null>(null);
   const isInitialized = useRef(false);
   const [selection, setSelection] = useState<Selection | null>(null);
@@ -65,7 +70,8 @@ const MapContainer = memo(function MapContainer({
       return;
     }
 
-    const militarySource = militaryLayerRef.current.getSource();
+    const militarySource =
+      militaryLayerRef.current.getSource() as VectorSource | null;
     if (!militarySource) {
       console.warn("❌ Military source not available");
       return;
@@ -114,17 +120,18 @@ const MapContainer = memo(function MapContainer({
     mapInstanceRef.current = map;
     isInitialized.current = true;
 
-    // Create the military features layer. In demo mode we use a GPU WebGLPointsLayer to
-    // stress-test rendering N points (moving when demoMove is set); otherwise the standard
-    // Canvas SVG layer for the live 1000-unit feed.
-    let militaryLayer:
-      | VectorLayer<VectorSource>
-      | WebGLPointsLayer<VectorSource>;
+    // Create the military features layer. In demo mode we use a GPU points layer to
+    // stress-test rendering N points; otherwise the standard Canvas SVG layer for the live
+    // 1000-unit feed.
+    let militaryLayer: Layer;
 
     if (demoScale > 0) {
-      const demo = demoServer
-        ? buildServerDrivenLayer(demoScale)
-        : buildDemoLayer(demoScale, demoMove);
+      const demo =
+        demoRenderer === "custom"
+          ? buildCustomDemoLayer(demoScale)
+          : demoServer
+            ? buildServerDrivenLayer(demoScale)
+            : buildDemoLayer(demoScale, demoMove);
       demoRef.current = demo;
       militaryLayer = demo.layer;
       demo.start();
@@ -201,7 +208,8 @@ const MapContainer = memo(function MapContainer({
         militaryLayerRef.current = null;
       }
     };
-  }, [updateMilitaryFeatures, demoScale, demoMove, demoServer]); // demo flags set once from URL
+    // demo flags are set once from the URL
+  }, [updateMilitaryFeatures, demoScale, demoMove, demoServer, demoRenderer]);
 
   // Update military features when props change (skipped in the WebGL demo path)
   useEffect(() => {

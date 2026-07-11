@@ -1,5 +1,6 @@
 import WebGLPointsLayer from "ol/layer/WebGLPoints";
 import VectorLayer from "ol/layer/Vector";
+import type Layer from "ol/layer/Layer";
 import VectorSource from "ol/source/Vector";
 import Feature from "ol/Feature";
 import Point from "ol/geom/Point";
@@ -7,6 +8,7 @@ import { fromLonLat } from "ol/proj";
 import { Style, Text, Fill, Stroke, Circle as CircleStyle } from "ol/style";
 import type { Extent } from "ol/extent";
 import { buildSymbolAtlas, type SymbolAtlas } from "./symbolAtlas";
+import { CustomPointsLayer } from "./customPointsLayer";
 import { FeatureStore } from "../services/featureStore";
 
 // Callsign labels only render at/above this zoom, so at most a screenful is ever drawn.
@@ -16,8 +18,9 @@ const LABEL_MAX = 400;
 
 interface LabelSource {
   count: () => number;
-  /** Current [x, y] Mercator coordinate of point i. */
-  coordAt: (i: number) => number[];
+  /** Current Mercator coordinate of point i (split to avoid per-call allocation). */
+  coordX: (i: number) => number;
+  coordY: (i: number) => number;
   variantAt: (i: number) => number;
 }
 
@@ -61,9 +64,10 @@ function createLabelController(src: LabelSource): LabelController {
     const n = src.count();
     const feats: Feature[] = [];
     for (let i = 0; i < n && feats.length < LABEL_MAX; i++) {
-      const c = src.coordAt(i);
-      if (c[0] >= minX && c[0] <= maxX && c[1] >= minY && c[1] <= maxY) {
-        const f = new Feature({ geometry: new Point([c[0], c[1]]) });
+      const cx = src.coordX(i);
+      const cy = src.coordY(i);
+      if (cx >= minX && cx <= maxX && cy >= minY && cy <= maxY) {
+        const f = new Feature({ geometry: new Point([cx, cy]) });
         f.set("idx", i, true);
         f.set("label", src.variantAt(i) < 4 ? `GND-${i}` : `AIR-${i}`);
         feats.push(f);
@@ -76,8 +80,7 @@ function createLabelController(src: LabelSource): LabelController {
   const reposition = () => {
     source.forEachFeature((f) => {
       const i = f.get("idx") as number;
-      const c = src.coordAt(i);
-      (f.getGeometry() as Point).setCoordinates([c[0], c[1]]);
+      (f.getGeometry() as Point).setCoordinates([src.coordX(i), src.coordY(i)]);
     });
   };
 
@@ -138,9 +141,8 @@ function createSelectionController(src: LabelSource): SelectionController {
     let bestD = tol * tol;
     const n = src.count();
     for (let i = 0; i < n; i++) {
-      const c = src.coordAt(i);
-      const dx = c[0] - coord[0];
-      const dy = c[1] - coord[1];
+      const dx = src.coordX(i) - coord[0];
+      const dy = src.coordY(i) - coord[1];
       const d = dx * dx + dy * dy;
       if (d < bestD) {
         bestD = d;
@@ -152,8 +154,10 @@ function createSelectionController(src: LabelSource): SelectionController {
       return null;
     }
     selected = best;
-    const c = src.coordAt(best);
-    (highlight.getGeometry() as Point).setCoordinates([c[0], c[1]]);
+    (highlight.getGeometry() as Point).setCoordinates([
+      src.coordX(best),
+      src.coordY(best),
+    ]);
     source.clear();
     source.addFeature(highlight);
     const variant = src.variantAt(best);
@@ -167,8 +171,10 @@ function createSelectionController(src: LabelSource): SelectionController {
 
   const reposition = () => {
     if (selected < 0) return;
-    const c = src.coordAt(selected);
-    (highlight.getGeometry() as Point).setCoordinates([c[0], c[1]]);
+    (highlight.getGeometry() as Point).setCoordinates([
+      src.coordX(selected),
+      src.coordY(selected),
+    ]);
   };
 
   return { layer, pick, clear, reposition };
@@ -207,7 +213,8 @@ function pointsStyle(atlas: SymbolAtlas) {
 }
 
 export interface DemoLayer {
-  layer: WebGLPointsLayer<VectorSource>;
+  /** The points layer — stock WebGLPointsLayer, or the custom WebGL Layer. */
+  layer: WebGLPointsLayer<VectorSource> | Layer;
   /** Canvas layer holding viewport-gated callsign labels; add above the points layer. */
   labelLayer: VectorLayer<VectorSource>;
   /** Canvas layer holding the selection highlight ring; add above the label layer. */
@@ -270,7 +277,8 @@ export function buildDemoLayer(count: number, moving: boolean): DemoLayer {
 
   const dataSrc: LabelSource = {
     count: () => count,
-    coordAt: (i) => coordRefs[i],
+    coordX: (i) => coordRefs[i][0],
+    coordY: (i) => coordRefs[i][1],
     variantAt: (i) => store.variant[i],
   };
   const labels = createLabelController(dataSrc);
@@ -362,7 +370,8 @@ export function buildServerDrivenLayer(
 
   const dataSrc: LabelSource = {
     count: () => coordRefs.length,
-    coordAt: (i) => coordRefs[i],
+    coordX: (i) => coordRefs[i][0],
+    coordY: (i) => coordRefs[i][1],
     variantAt: (i) => variants[i] ?? 0,
   };
   const labels = createLabelController(dataSrc);
@@ -436,6 +445,106 @@ export function buildServerDrivenLayer(
         worker.postMessage({ op: "disconnect" });
         worker.terminate();
         worker = null;
+      }
+    },
+  };
+}
+
+/**
+ * Build the custom WebGL layer (the deferred renderer) driven by the FeatureStore, with
+ * GPU-side interpolation between ticks. There are NO ol/Feature objects — labels and selection
+ * read straight from the store's typed arrays. Always animated.
+ */
+export function buildCustomDemoLayer(count: number): DemoLayer {
+  const atlas = buildSymbolAtlas();
+
+  const [minX, minY] = fromLonLat([
+    DEMO_BOUNDS_LONLAT.west,
+    DEMO_BOUNDS_LONLAT.south,
+  ]);
+  const [maxX, maxY] = fromLonLat([
+    DEMO_BOUNDS_LONLAT.east,
+    DEMO_BOUNDS_LONLAT.north,
+  ]);
+  const store = new FeatureStore(count, { minX, minY, maxX, maxY });
+  store.seedRandom(count, {
+    variantCount: atlas.count,
+    speedScale: DEMO_SPEED_SCALE,
+  });
+
+  const custom = new CustomPointsLayer(atlas);
+  custom.setVariants(store.variant, count);
+  // Upload positions relative to the bounds origin so the shader keeps float32 precision.
+  custom.setOrigin(minX, minY);
+
+  // Interleaved [x,y] position buffers (origin-relative) + per-point rotation, refilled per tick.
+  const prev = new Float32Array(count * 2);
+  const target = new Float32Array(count * 2);
+  const rot = new Float32Array(count);
+  const fillTarget = () => {
+    const { x, y, heading } = store;
+    for (let i = 0; i < count; i++) {
+      target[2 * i] = x[i] - minX;
+      target[2 * i + 1] = y[i] - minY;
+      rot[i] = heading[i];
+    }
+  };
+  fillTarget();
+  prev.set(target);
+  custom.uploadTick(prev, target, rot, DEMO_TICK_MS);
+
+  const dataSrc: LabelSource = {
+    count: () => count,
+    coordX: (i) => store.x[i],
+    coordY: (i) => store.y[i],
+    variantAt: (i) => store.variant[i],
+  };
+  const labels = createLabelController(dataSrc);
+  const selection = createSelectionController(dataSrc);
+
+  let timer: ReturnType<typeof setInterval> | null = null;
+  let raf = 0;
+  let lastMs = 0;
+
+  const tick = () => {
+    const now = performance.now();
+    const dt = lastMs ? (now - lastMs) / 1000 : DEMO_TICK_MS / 1000;
+    lastMs = now;
+    prev.set(target); // last target becomes the new prev
+    store.step(dt);
+    fillTarget();
+    custom.uploadTick(prev, target, rot, DEMO_TICK_MS);
+    labels.reposition();
+    selection.reposition();
+  };
+
+  // Drive a render every frame so the GPU interpolation factor advances smoothly.
+  const animate = () => {
+    custom.layer.changed();
+    raf = requestAnimationFrame(animate);
+  };
+
+  return {
+    layer: custom.layer,
+    labelLayer: labels.layer,
+    highlightLayer: selection.layer,
+    updateLabels: labels.update,
+    pickAt: selection.pick,
+    clearSelection: selection.clear,
+    start: () => {
+      if (timer) return;
+      lastMs = 0;
+      timer = setInterval(tick, DEMO_TICK_MS);
+      raf = requestAnimationFrame(animate);
+    },
+    stop: () => {
+      if (timer) {
+        clearInterval(timer);
+        timer = null;
+      }
+      if (raf) {
+        cancelAnimationFrame(raf);
+        raf = 0;
       }
     },
   };

@@ -1,6 +1,8 @@
-# Future Plan: Custom WebGL Point Renderer
+# Custom WebGL Point Renderer
 
-**Status:** Deferred (captured while building Phase 3). Not scheduled.
+**Status:** Delivered. Implemented in `app/utils/customPointsLayer.ts` and driven by
+`buildCustomDemoLayer` in `app/utils/webglPointsDemo.ts`; enable with `?renderer=custom`.
+This doc is kept as the design rationale.
 
 ## Why this exists
 
