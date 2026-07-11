@@ -11,6 +11,18 @@ import {
 export default function Home() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [isAnimating, setIsAnimating] = useState(false);
+  // Demo flags come from the URL, but the page is statically prerendered — reading the URL
+  // during render would make SSR (no query) disagree with the client and break hydration.
+  // So resolve them in a client-only effect and gate the map mount until they're known.
+  // `?scale=N` renders N points via WebGLPointsLayer, `?move=1` animates them (Phase 2),
+  // `?source=server` drives them from the binary server (Phase 3).
+  const [demo, setDemo] = useState({
+    scale: 0,
+    move: false,
+    server: false,
+    renderer: "",
+    ready: false,
+  });
   const [militaryFeatures, setMilitaryFeatures] = useState<MilitaryFeature[]>(
     [],
   );
@@ -35,8 +47,27 @@ export default function Home() {
     militaryFeatureService.setConnectionMode(newMode === "websocket");
   };
 
+  // Resolve URL flags on the client only, then reveal the map (see note above). One-time
+  // client read to avoid an SSR hydration mismatch — the canonical "mounted" pattern.
+  useEffect(() => {
+    const p = new URLSearchParams(window.location.search);
+    const n = parseInt(p.get("scale") ?? "", 10);
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- deliberate one-time sync
+    setDemo({
+      scale: Number.isFinite(n) && n > 0 ? n : 0,
+      move: p.get("move") === "1",
+      server: p.get("source") === "server",
+      renderer: p.get("renderer") ?? "",
+      ready: true,
+    });
+  }, []);
+
   // Update military features state when they change (WebSocket-driven)
   useEffect(() => {
+    // Wait until flags are known; in GPU demo mode the map self-generates points, so skip
+    // the live data service.
+    if (!demo.ready || demo.scale > 0) return;
+
     const updateFeatures = (features: MilitaryFeature[]) => {
       console.log(
         `📡 Main page received ${features.length} features from WebSocket`,
@@ -63,11 +94,11 @@ export default function Home() {
       militaryFeatureService.stopUpdates();
       clearInterval(statusInterval);
     };
-  }, []);
+  }, [demo.ready, demo.scale]);
 
   // Calculate statistics
   const stats = {
-    total: militaryFeatures.length,
+    total: demo.scale > 0 ? demo.scale : militaryFeatures.length,
     tanks: militaryFeatures.filter((f) => f.type === "tank").length,
     aircraft: militaryFeatures.filter((f) => f.type === "aircraft").length,
     friendly: militaryFeatures.filter((f) => f.status === "friendly").length,
@@ -144,8 +175,16 @@ export default function Home() {
       </header>
 
       <main className="flex-1 relative">
-        {/* Full-screen Map Container */}
-        <MapContainer features={militaryFeatures} />
+        {/* Full-screen Map Container (mounted once flags are resolved on the client) */}
+        {demo.ready && (
+          <MapContainer
+            features={militaryFeatures}
+            demoScale={demo.scale}
+            demoMove={demo.move}
+            demoServer={demo.server}
+            demoRenderer={demo.renderer}
+          />
+        )}
 
         {/* Overlay Sidebar */}
         <div

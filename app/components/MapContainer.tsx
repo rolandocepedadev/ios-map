@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useRef, useEffect, useCallback } from "react";
+import { memo, useRef, useEffect, useCallback, useState } from "react";
 import "ol/ol.css";
 import Map from "ol/Map";
 import View from "ol/View";
@@ -8,24 +8,58 @@ import { fromLonLat } from "ol/proj";
 import { defaults as defaultControls } from "ol/control";
 import { apply } from "ol-mapbox-style";
 import VectorLayer from "ol/layer/Vector";
+import Layer from "ol/layer/Layer";
 import VectorSource from "ol/source/Vector";
 import Feature from "ol/Feature";
 import Point from "ol/geom/Point";
 import { Style, Icon } from "ol/style";
 import { MilitaryFeature } from "../services/militaryFeatures";
 import { createMilStdIcon } from "../utils/milStd2525";
+import {
+  buildDemoLayer,
+  buildServerDrivenLayer,
+  buildCustomDemoLayer,
+  type DemoLayer,
+  type Selection,
+} from "../utils/webglPointsDemo";
 
 interface MapContainerProps {
   features: MilitaryFeature[];
+  /**
+   * GPU stress test: when set (via `?scale=N`), render N points through a WebGLPointsLayer
+   * instead of the Canvas SVG path. Proves the renderer scales to ~1M.
+   */
+  demoScale?: number;
+  /**
+   * When true (via `?move=1`), animate the demo points from the columnar FeatureStore
+   * (Phase 2). Otherwise the demo points are static.
+   */
+  demoMove?: boolean;
+  /**
+   * When true (via `?source=server`), drive the demo from the binary server through a Web
+   * Worker (Phase 3) instead of the client-side simulation.
+   */
+  demoServer?: boolean;
+  /**
+   * When "custom" (via `?renderer=custom`), use the custom WebGL renderer with GPU-side
+   * interpolation instead of the stock WebGLPointsLayer.
+   */
+  demoRenderer?: string;
 }
 
 const MapContainer = memo(function MapContainer({
   features,
+  demoScale = 0,
+  demoMove = false,
+  demoServer = false,
+  demoRenderer = "",
 }: MapContainerProps) {
   const mapRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<Map | null>(null);
-  const militaryLayerRef = useRef<VectorLayer<VectorSource> | null>(null);
+  const militaryLayerRef = useRef<Layer | null>(null);
+  const demoRef = useRef<DemoLayer | null>(null);
   const isInitialized = useRef(false);
+  const [selection, setSelection] = useState<Selection | null>(null);
 
   // Function to update military features on the map
   const updateMilitaryFeatures = useCallback((features: MilitaryFeature[]) => {
@@ -36,7 +70,8 @@ const MapContainer = memo(function MapContainer({
       return;
     }
 
-    const militarySource = militaryLayerRef.current.getSource();
+    const militarySource =
+      militaryLayerRef.current.getSource() as VectorSource | null;
     if (!militarySource) {
       console.warn("❌ Military source not available");
       return;
@@ -85,23 +120,58 @@ const MapContainer = memo(function MapContainer({
     mapInstanceRef.current = map;
     isInitialized.current = true;
 
-    // Create military features layer
-    const militarySource = new VectorSource();
-    const militaryLayer = new VectorLayer({
-      source: militarySource,
-      style: (feature) => {
-        const militaryFeature = feature.get("militaryData") as MilitaryFeature;
-        if (!militaryFeature) return new Style();
+    // Create the military features layer. In demo mode we use a GPU points layer to
+    // stress-test rendering N points; otherwise the standard Canvas SVG layer for the live
+    // 1000-unit feed.
+    let militaryLayer: Layer;
 
-        const iconConfig = createMilStdIcon(militaryFeature);
-        return new Style({
-          image: new Icon(iconConfig),
-        });
-      },
-    });
+    if (demoScale > 0) {
+      const demo =
+        demoRenderer === "custom"
+          ? buildCustomDemoLayer(demoScale)
+          : demoServer
+            ? buildServerDrivenLayer(demoScale)
+            : buildDemoLayer(demoScale, demoMove);
+      demoRef.current = demo;
+      militaryLayer = demo.layer;
+      demo.start();
+    } else {
+      militaryLayer = new VectorLayer({
+        source: new VectorSource(),
+        style: (feature) => {
+          const militaryFeature = feature.get(
+            "militaryData",
+          ) as MilitaryFeature;
+          if (!militaryFeature) return new Style();
+
+          const iconConfig = createMilStdIcon(militaryFeature);
+          return new Style({
+            image: new Icon(iconConfig),
+          });
+        },
+      });
+    }
 
     militaryLayerRef.current = militaryLayer;
     map.addLayer(militaryLayer);
+
+    // In demo mode, add the label + highlight layers, refresh labels when the view settles,
+    // and pick the nearest unit on click.
+    const demo = demoRef.current;
+    if (demo) {
+      map.addLayer(demo.labelLayer);
+      map.addLayer(demo.highlightLayer);
+      const view = map.getView();
+      const refreshLabels = () => {
+        const size = map.getSize();
+        if (size) demo.updateLabels(view.calculateExtent(size), view.getZoom() ?? 0);
+      };
+      map.on("moveend", refreshLabels);
+      map.on("singleclick", (e) => {
+        const resolution = view.getResolution() ?? 1;
+        setSelection(demo.pickAt(e.coordinate, resolution));
+      });
+    }
 
     // Apply MapTiler vector style
     apply(
@@ -109,9 +179,15 @@ const MapContainer = memo(function MapContainer({
       "https://api.maptiler.com/maps/019aa851-7005-7219-9be8-65f5e65ce6b4/style.json?key=RxKwgw2F5GydcRbFAqMS",
     )
       .then(() => {
-        // Ensure military layer is on top after base map loads
+        // Ensure the points (and labels/highlight) stay on top after the base map loads.
         map.removeLayer(militaryLayer);
         map.addLayer(militaryLayer);
+        if (demo) {
+          map.removeLayer(demo.labelLayer);
+          map.addLayer(demo.labelLayer);
+          map.removeLayer(demo.highlightLayer);
+          map.addLayer(demo.highlightLayer);
+        }
       })
       .catch((error) => {
         console.error("Error applying MapTiler style:", error);
@@ -119,6 +195,10 @@ const MapContainer = memo(function MapContainer({
 
     // Cleanup only on component unmount
     return () => {
+      if (demoRef.current) {
+        demoRef.current.stop();
+        demoRef.current = null;
+      }
       if (mapInstanceRef.current) {
         mapInstanceRef.current.setTarget(undefined);
         mapInstanceRef.current = null;
@@ -128,15 +208,17 @@ const MapContainer = memo(function MapContainer({
         militaryLayerRef.current = null;
       }
     };
-  }, [updateMilitaryFeatures]); // Include updateMilitaryFeatures in dependencies
+    // demo flags are set once from the URL
+  }, [updateMilitaryFeatures, demoScale, demoMove, demoServer, demoRenderer]);
 
-  // Update military features when props change
+  // Update military features when props change (skipped in the WebGL demo path)
   useEffect(() => {
+    if (demoScale > 0) return;
     console.log(`🔄 MapContainer received ${features?.length || 0} features`);
     if (features && features.length > 0) {
       updateMilitaryFeatures(features);
     }
-  }, [features, updateMilitaryFeatures]);
+  }, [features, updateMilitaryFeatures, demoScale]);
 
   return (
     <div className="absolute inset-0">
@@ -149,6 +231,48 @@ const MapContainer = memo(function MapContainer({
           overflow: "hidden",
         }}
       />
+
+      {/* Selected-unit info panel (demo hit-detection) */}
+      {selection && (
+        <div className="absolute bottom-4 right-4 z-20 min-w-[200px] rounded-lg border border-zinc-700 bg-zinc-900/95 backdrop-blur-sm p-3 shadow-2xl">
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-sm font-semibold text-sky-400 military-data">
+              {selection.callsign}
+            </span>
+            <button
+              onClick={() => {
+                demoRef.current?.clearSelection();
+                setSelection(null);
+              }}
+              className="text-zinc-500 hover:text-zinc-200 transition-colors"
+              aria-label="Clear selection"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M6 18L18 6M6 6l12 12"
+                />
+              </svg>
+            </button>
+          </div>
+          <dl className="space-y-1 text-xs">
+            <div className="flex justify-between">
+              <dt className="text-zinc-400">Type</dt>
+              <dd className="text-zinc-200">{selection.kind}</dd>
+            </div>
+            <div className="flex justify-between">
+              <dt className="text-zinc-400">Affiliation</dt>
+              <dd className="text-zinc-200">{selection.status}</dd>
+            </div>
+            <div className="flex justify-between">
+              <dt className="text-zinc-400">Index</dt>
+              <dd className="text-zinc-200">{selection.index}</dd>
+            </div>
+          </dl>
+        </div>
+      )}
     </div>
   );
 });
