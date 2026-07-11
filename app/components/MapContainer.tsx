@@ -15,7 +15,11 @@ import Point from "ol/geom/Point";
 import { Style, Icon } from "ol/style";
 import { MilitaryFeature } from "../services/militaryFeatures";
 import { createMilStdIcon } from "../utils/milStd2525";
-import { buildDemoLayer, type DemoLayer } from "../utils/webglPointsDemo";
+import {
+  buildDemoLayer,
+  buildServerDrivenLayer,
+  type DemoLayer,
+} from "../utils/webglPointsDemo";
 
 interface MapContainerProps {
   features: MilitaryFeature[];
@@ -29,12 +33,18 @@ interface MapContainerProps {
    * (Phase 2). Otherwise the demo points are static.
    */
   demoMove?: boolean;
+  /**
+   * When true (via `?source=server`), drive the demo from the binary server through a Web
+   * Worker (Phase 3) instead of the client-side simulation.
+   */
+  demoServer?: boolean;
 }
 
 const MapContainer = memo(function MapContainer({
   features,
   demoScale = 0,
   demoMove = false,
+  demoServer = false,
 }: MapContainerProps) {
   const mapRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<Map | null>(null);
@@ -110,7 +120,9 @@ const MapContainer = memo(function MapContainer({
       | WebGLPointsLayer<VectorSource>;
 
     if (demoScale > 0) {
-      const demo = buildDemoLayer(demoScale, demoMove);
+      const demo = demoServer
+        ? buildServerDrivenLayer(demoScale)
+        : buildDemoLayer(demoScale, demoMove);
       demoRef.current = demo;
       militaryLayer = demo.layer;
       demo.start();
@@ -163,7 +175,7 @@ const MapContainer = memo(function MapContainer({
         militaryLayerRef.current = null;
       }
     };
-  }, [updateMilitaryFeatures, demoScale, demoMove]); // demo flags are set once from the URL
+  }, [updateMilitaryFeatures, demoScale, demoMove, demoServer]); // demo flags set once from URL
 
   // Update military features when props change (skipped in the WebGL demo path)
   useEffect(() => {

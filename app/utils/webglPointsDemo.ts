@@ -134,3 +134,90 @@ export function buildDemoLayer(count: number, moving: boolean): DemoLayer {
     },
   };
 }
+
+/** Default endpoint for the binary feature server (Phase 3). */
+export const BINARY_SERVER_URL = "ws://localhost:8081/binary-features";
+
+/**
+ * Build a WebGLPointsLayer fed by the binary server via a Web Worker. The worker owns the
+ * socket, decodes frames, and posts Mercator position buffers; this main-thread code only
+ * builds the features once (on snapshot) and writes positions in place each tick.
+ */
+export function buildServerDrivenLayer(
+  requestedCount: number,
+  url: string = BINARY_SERVER_URL,
+): DemoLayer {
+  const atlas = buildSymbolAtlas();
+  const source = new VectorSource();
+  const layer = new WebGLPointsLayer<VectorSource>({
+    source,
+    style: pointsStyle(atlas),
+  });
+
+  let worker: Worker | null = null;
+  let coordRefs: number[][] = [];
+
+  const onSnapshot = (data: {
+    count: number;
+    x: Float32Array;
+    y: Float32Array;
+    variant: Uint8Array;
+    rot: Float32Array;
+  }) => {
+    const { count, x, y, variant, rot } = data;
+    console.time(`🧪 build ${count} server features`);
+    source.clear();
+    const feats: Feature[] = new Array(count);
+    coordRefs = new Array(count);
+    for (let i = 0; i < count; i++) {
+      const geom = new Point([x[i], y[i]]);
+      const f = new Feature({ geometry: geom });
+      f.set("variant", variant[i], true);
+      f.set("rot", rot[i], true);
+      feats[i] = f;
+      coordRefs[i] = geom.getFlatCoordinates();
+    }
+    source.addFeatures(feats);
+    console.timeEnd(`🧪 build ${count} server features`);
+  };
+
+  const onPositions = (data: { count: number; x: Float32Array; y: Float32Array }) => {
+    const { count, x, y } = data;
+    if (count !== coordRefs.length) return; // ignore until features are built
+    const now = performance.now();
+    for (let i = 0; i < count; i++) {
+      const c = coordRefs[i];
+      c[0] = x[i];
+      c[1] = y[i];
+    }
+    source.changed();
+    const cost = performance.now() - now;
+    if (cost > 8) {
+      console.log(`🛰️ applied ${count} positions in ${cost.toFixed(1)}ms (main thread)`);
+    }
+  };
+
+  return {
+    layer,
+    start: () => {
+      if (worker) return;
+      worker = new Worker(
+        new URL("../workers/featureWorker.ts", import.meta.url),
+        { type: "module" },
+      );
+      worker.onmessage = (event: MessageEvent) => {
+        const msg = event.data;
+        if (msg.type === "snapshot") onSnapshot(msg);
+        else if (msg.type === "positions") onPositions(msg);
+      };
+      worker.postMessage({ op: "connect", url, count: requestedCount });
+    },
+    stop: () => {
+      if (worker) {
+        worker.postMessage({ op: "disconnect" });
+        worker.terminate();
+        worker = null;
+      }
+    },
+  };
+}

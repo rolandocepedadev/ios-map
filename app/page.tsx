@@ -23,6 +23,11 @@ export default function Home() {
     if (typeof window === "undefined") return false;
     return new URLSearchParams(window.location.search).get("move") === "1";
   });
+  // `?source=server` drives the demo from the binary server via a Web Worker (Phase 3).
+  const [demoServer] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    return new URLSearchParams(window.location.search).get("source") === "server";
+  });
   const [militaryFeatures, setMilitaryFeatures] = useState<MilitaryFeature[]>(
     [],
   );
@@ -164,6 +169,7 @@ export default function Home() {
           features={militaryFeatures}
           demoScale={demoScale}
           demoMove={demoMove}
+          demoServer={demoServer}
         />
 
         {/* Overlay Sidebar */}
