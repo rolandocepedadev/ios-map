@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useRef, useEffect, useCallback } from "react";
+import { memo, useRef, useEffect, useCallback, useState } from "react";
 import "ol/ol.css";
 import Map from "ol/Map";
 import View from "ol/View";
@@ -19,6 +19,7 @@ import {
   buildDemoLayer,
   buildServerDrivenLayer,
   type DemoLayer,
+  type Selection,
 } from "../utils/webglPointsDemo";
 
 interface MapContainerProps {
@@ -53,6 +54,7 @@ const MapContainer = memo(function MapContainer({
   >(null);
   const demoRef = useRef<DemoLayer | null>(null);
   const isInitialized = useRef(false);
+  const [selection, setSelection] = useState<Selection | null>(null);
 
   // Function to update military features on the map
   const updateMilitaryFeatures = useCallback((features: MilitaryFeature[]) => {
@@ -146,16 +148,22 @@ const MapContainer = memo(function MapContainer({
     militaryLayerRef.current = militaryLayer;
     map.addLayer(militaryLayer);
 
-    // In demo mode, add the viewport-gated label layer and refresh it when the view settles.
+    // In demo mode, add the label + highlight layers, refresh labels when the view settles,
+    // and pick the nearest unit on click.
     const demo = demoRef.current;
     if (demo) {
       map.addLayer(demo.labelLayer);
+      map.addLayer(demo.highlightLayer);
       const view = map.getView();
       const refreshLabels = () => {
         const size = map.getSize();
         if (size) demo.updateLabels(view.calculateExtent(size), view.getZoom() ?? 0);
       };
       map.on("moveend", refreshLabels);
+      map.on("singleclick", (e) => {
+        const resolution = view.getResolution() ?? 1;
+        setSelection(demo.pickAt(e.coordinate, resolution));
+      });
     }
 
     // Apply MapTiler vector style
@@ -164,12 +172,14 @@ const MapContainer = memo(function MapContainer({
       "https://api.maptiler.com/maps/019aa851-7005-7219-9be8-65f5e65ce6b4/style.json?key=RxKwgw2F5GydcRbFAqMS",
     )
       .then(() => {
-        // Ensure the points (and labels) stay on top after the base map loads.
+        // Ensure the points (and labels/highlight) stay on top after the base map loads.
         map.removeLayer(militaryLayer);
         map.addLayer(militaryLayer);
         if (demo) {
           map.removeLayer(demo.labelLayer);
           map.addLayer(demo.labelLayer);
+          map.removeLayer(demo.highlightLayer);
+          map.addLayer(demo.highlightLayer);
         }
       })
       .catch((error) => {
@@ -213,6 +223,48 @@ const MapContainer = memo(function MapContainer({
           overflow: "hidden",
         }}
       />
+
+      {/* Selected-unit info panel (demo hit-detection) */}
+      {selection && (
+        <div className="absolute bottom-4 right-4 z-20 min-w-[200px] rounded-lg border border-zinc-700 bg-zinc-900/95 backdrop-blur-sm p-3 shadow-2xl">
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-sm font-semibold text-sky-400 military-data">
+              {selection.callsign}
+            </span>
+            <button
+              onClick={() => {
+                demoRef.current?.clearSelection();
+                setSelection(null);
+              }}
+              className="text-zinc-500 hover:text-zinc-200 transition-colors"
+              aria-label="Clear selection"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M6 18L18 6M6 6l12 12"
+                />
+              </svg>
+            </button>
+          </div>
+          <dl className="space-y-1 text-xs">
+            <div className="flex justify-between">
+              <dt className="text-zinc-400">Type</dt>
+              <dd className="text-zinc-200">{selection.kind}</dd>
+            </div>
+            <div className="flex justify-between">
+              <dt className="text-zinc-400">Affiliation</dt>
+              <dd className="text-zinc-200">{selection.status}</dd>
+            </div>
+            <div className="flex justify-between">
+              <dt className="text-zinc-400">Index</dt>
+              <dd className="text-zinc-200">{selection.index}</dd>
+            </div>
+          </dl>
+        </div>
+      )}
     </div>
   );
 });

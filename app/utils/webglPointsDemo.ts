@@ -4,7 +4,7 @@ import VectorSource from "ol/source/Vector";
 import Feature from "ol/Feature";
 import Point from "ol/geom/Point";
 import { fromLonLat } from "ol/proj";
-import { Style, Text, Fill, Stroke } from "ol/style";
+import { Style, Text, Fill, Stroke, Circle as CircleStyle } from "ol/style";
 import type { Extent } from "ol/extent";
 import { buildSymbolAtlas, type SymbolAtlas } from "./symbolAtlas";
 import { FeatureStore } from "../services/featureStore";
@@ -84,6 +84,96 @@ function createLabelController(src: LabelSource): LabelController {
   return { layer, update, reposition };
 }
 
+/** Details of the currently-selected unit, shown in the map's info panel. */
+export interface Selection {
+  index: number;
+  callsign: string;
+  kind: "Ground" | "Air";
+  status: string;
+}
+
+// Status index (variant % 4) → affiliation name, matching the atlas variant layout.
+const STATUS_NAMES = ["Friendly", "Hostile", "Neutral", "Unknown"];
+// Click tolerance in screen pixels for picking the nearest point.
+const PICK_TOLERANCE_PX = 12;
+
+interface SelectionController {
+  layer: VectorLayer<VectorSource>;
+  /** Pick the nearest point within tolerance of a clicked coordinate. */
+  pick: (coord: number[], resolution: number) => Selection | null;
+  clear: () => void;
+  /** Keep the highlight glued to the selected point as it moves (call per tick). */
+  reposition: () => void;
+}
+
+/**
+ * Click-to-select (Phase 4). Rather than enabling OpenLayers' always-on GPU hit detection —
+ * which adds per-frame cost to every one of the 1M points — we scan our own position arrays
+ * once per click (clicks are rare) to find the nearest point, and draw a highlight ring that
+ * tracks it. Selection is by index, so it survives movement.
+ */
+function createSelectionController(src: LabelSource): SelectionController {
+  const source = new VectorSource();
+  const highlight = new Feature({ geometry: new Point([0, 0]) });
+  const layer = new VectorLayer({
+    source,
+    style: new Style({
+      image: new CircleStyle({
+        radius: 14,
+        stroke: new Stroke({ color: "#38bdf8", width: 3 }),
+      }),
+    }),
+  });
+
+  let selected = -1;
+
+  const clear = () => {
+    selected = -1;
+    source.clear();
+  };
+
+  const pick = (coord: number[], resolution: number): Selection | null => {
+    const tol = PICK_TOLERANCE_PX * resolution;
+    let best = -1;
+    let bestD = tol * tol;
+    const n = src.count();
+    for (let i = 0; i < n; i++) {
+      const c = src.coordAt(i);
+      const dx = c[0] - coord[0];
+      const dy = c[1] - coord[1];
+      const d = dx * dx + dy * dy;
+      if (d < bestD) {
+        bestD = d;
+        best = i;
+      }
+    }
+    if (best < 0) {
+      clear();
+      return null;
+    }
+    selected = best;
+    const c = src.coordAt(best);
+    (highlight.getGeometry() as Point).setCoordinates([c[0], c[1]]);
+    source.clear();
+    source.addFeature(highlight);
+    const variant = src.variantAt(best);
+    return {
+      index: best,
+      callsign: variant < 4 ? `GND-${best}` : `AIR-${best}`,
+      kind: variant < 4 ? "Ground" : "Air",
+      status: STATUS_NAMES[variant % 4],
+    };
+  };
+
+  const reposition = () => {
+    if (selected < 0) return;
+    const c = src.coordAt(selected);
+    (highlight.getGeometry() as Point).setCoordinates([c[0], c[1]]);
+  };
+
+  return { layer, pick, clear, reposition };
+}
+
 /**
  * WebGL point demo layers for the 1M stress test.
  *
@@ -120,8 +210,14 @@ export interface DemoLayer {
   layer: WebGLPointsLayer<VectorSource>;
   /** Canvas layer holding viewport-gated callsign labels; add above the points layer. */
   labelLayer: VectorLayer<VectorSource>;
+  /** Canvas layer holding the selection highlight ring; add above the label layer. */
+  highlightLayer: VectorLayer<VectorSource>;
   /** Refresh labels for the current view (call on moveend). */
   updateLabels: (extent: Extent, zoom: number) => void;
+  /** Pick the nearest unit to a clicked map coordinate, or null if none is close. */
+  pickAt: (coord: number[], resolution: number) => Selection | null;
+  /** Clear the current selection. */
+  clearSelection: () => void;
   /** Begins the animation loop (moving demo only). Returns a no-op when static. */
   start: () => void;
   /** Stops the animation loop and releases the interval. */
@@ -172,17 +268,22 @@ export function buildDemoLayer(count: number, moving: boolean): DemoLayer {
   source.addFeatures(feats);
   console.timeEnd(`🧪 build ${count} demo features`);
 
-  const labels = createLabelController({
+  const dataSrc: LabelSource = {
     count: () => count,
     coordAt: (i) => coordRefs[i],
     variantAt: (i) => store.variant[i],
-  });
+  };
+  const labels = createLabelController(dataSrc);
+  const selection = createSelectionController(dataSrc);
 
   if (!moving) {
     return {
       layer,
       labelLayer: labels.layer,
+      highlightLayer: selection.layer,
       updateLabels: labels.update,
+      pickAt: selection.pick,
+      clearSelection: selection.clear,
       start: () => {},
       stop: () => {},
     };
@@ -207,6 +308,7 @@ export function buildDemoLayer(count: number, moving: boolean): DemoLayer {
     // Single revision bump → exactly one buffer rebuild for the whole batch.
     source.changed();
     labels.reposition();
+    selection.reposition();
 
     const cost = performance.now() - now;
     if (cost > 8) {
@@ -217,7 +319,10 @@ export function buildDemoLayer(count: number, moving: boolean): DemoLayer {
   return {
     layer,
     labelLayer: labels.layer,
+    highlightLayer: selection.layer,
     updateLabels: labels.update,
+    pickAt: selection.pick,
+    clearSelection: selection.clear,
     start: () => {
       if (timer) return;
       lastMs = 0;
@@ -255,11 +360,13 @@ export function buildServerDrivenLayer(
   let coordRefs: number[][] = [];
   let variants: Uint8Array = new Uint8Array(0);
 
-  const labels = createLabelController({
+  const dataSrc: LabelSource = {
     count: () => coordRefs.length,
     coordAt: (i) => coordRefs[i],
     variantAt: (i) => variants[i] ?? 0,
-  });
+  };
+  const labels = createLabelController(dataSrc);
+  const selection = createSelectionController(dataSrc);
 
   const onSnapshot = (data: {
     count: number;
@@ -297,6 +404,7 @@ export function buildServerDrivenLayer(
     }
     source.changed();
     labels.reposition();
+    selection.reposition();
     const cost = performance.now() - now;
     if (cost > 8) {
       console.log(`🛰️ applied ${count} positions in ${cost.toFixed(1)}ms (main thread)`);
@@ -306,7 +414,10 @@ export function buildServerDrivenLayer(
   return {
     layer,
     labelLayer: labels.layer,
+    highlightLayer: selection.layer,
     updateLabels: labels.update,
+    pickAt: selection.pick,
+    clearSelection: selection.clear,
     start: () => {
       if (worker) return;
       worker = new Worker(
