@@ -11,12 +11,17 @@ import {
 export default function Home() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [isAnimating, setIsAnimating] = useState(false);
-  // Phase 1 GPU stress test: `?scale=N` renders N static points via WebGLPointsLayer.
+  // GPU stress test: `?scale=N` renders N points via WebGLPointsLayer; `?move=1` animates
+  // them from the columnar FeatureStore (Phase 2).
   const [demoScale] = useState<number>(() => {
     if (typeof window === "undefined") return 0;
     const raw = new URLSearchParams(window.location.search).get("scale");
     const n = raw ? parseInt(raw, 10) : 0;
     return Number.isFinite(n) && n > 0 ? n : 0;
+  });
+  const [demoMove] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    return new URLSearchParams(window.location.search).get("move") === "1";
   });
   const [militaryFeatures, setMilitaryFeatures] = useState<MilitaryFeature[]>(
     [],
@@ -155,7 +160,11 @@ export default function Home() {
 
       <main className="flex-1 relative">
         {/* Full-screen Map Container */}
-        <MapContainer features={militaryFeatures} demoScale={demoScale} />
+        <MapContainer
+          features={militaryFeatures}
+          demoScale={demoScale}
+          demoMove={demoMove}
+        />
 
         {/* Overlay Sidebar */}
         <div
