@@ -34,6 +34,16 @@ A custom OpenLayers layer + renderer (extend `ol/layer/Layer` with a WebGL rende
   already owns a store and posts position buffers via transferables; the custom renderer would
   consume those buffers with zero per-object main-thread work.
 
+## Also unblocks: smooth interpolation at scale
+
+Gliding points between server/sim ticks (instead of the current stepped jumps) requires new
+positions every animation frame. On the stock `WebGLPointsLayer` the only way to push new
+positions is `source.changed()`, which forces a full O(N) buffer rebuild — so per-frame
+interpolation means a full 1M rebuild 60×/second, which is not viable. The custom renderer
+solves this for free: upload `prev` and `target` as two per-instance attributes and `mix()`
+them in the vertex shader against a single `u_t` time uniform, so interpolation costs nothing
+on the CPU. Phase 4's smooth-motion goal is therefore deferred here alongside the renderer.
+
 ## Expected payoff
 
 - **Memory:** drop from ~0.5–1 GB to tens of MB at 1M.

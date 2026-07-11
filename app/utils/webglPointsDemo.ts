@@ -1,10 +1,88 @@
 import WebGLPointsLayer from "ol/layer/WebGLPoints";
+import VectorLayer from "ol/layer/Vector";
 import VectorSource from "ol/source/Vector";
 import Feature from "ol/Feature";
 import Point from "ol/geom/Point";
 import { fromLonLat } from "ol/proj";
+import { Style, Text, Fill, Stroke } from "ol/style";
+import type { Extent } from "ol/extent";
 import { buildSymbolAtlas, type SymbolAtlas } from "./symbolAtlas";
 import { FeatureStore } from "../services/featureStore";
+
+// Callsign labels only render at/above this zoom, so at most a screenful is ever drawn.
+const LABEL_MIN_ZOOM = 13;
+// Hard cap on labels per refresh — a viewport at high zoom holds far fewer than this.
+const LABEL_MAX = 400;
+
+interface LabelSource {
+  count: () => number;
+  /** Current [x, y] Mercator coordinate of point i. */
+  coordAt: (i: number) => number[];
+  variantAt: (i: number) => number;
+}
+
+interface LabelController {
+  layer: VectorLayer<VectorSource>;
+  /** Re-scan the view and rebuild the visible label set (call on moveend). */
+  update: (extent: Extent, zoom: number) => void;
+  /** Cheaply move the existing labels to their points' current positions (call per tick). */
+  reposition: () => void;
+}
+
+/**
+ * Viewport-gated callsign labels (Phase 4). A separate Canvas text layer that, on demand,
+ * is filled with labels only for the points currently in view above a zoom threshold — never
+ * anywhere near 1M. Scans live positions (so it is correct even while points move), capped and
+ * decluttered. Callsigns are derived from index + type so we never store 1M label strings.
+ */
+function createLabelController(src: LabelSource): LabelController {
+  const source = new VectorSource();
+  const layer = new VectorLayer({
+    source,
+    declutter: true,
+    style: (f) =>
+      new Style({
+        text: new Text({
+          text: String(f.get("label")),
+          font: "11px system-ui, sans-serif",
+          offsetY: -12,
+          fill: new Fill({ color: "#e5e7eb" }),
+          stroke: new Stroke({ color: "#000000", width: 3 }),
+        }),
+      }),
+  });
+
+  const update = (extent: Extent, zoom: number) => {
+    if (zoom < LABEL_MIN_ZOOM) {
+      source.clear();
+      return;
+    }
+    const [minX, minY, maxX, maxY] = extent;
+    const n = src.count();
+    const feats: Feature[] = [];
+    for (let i = 0; i < n && feats.length < LABEL_MAX; i++) {
+      const c = src.coordAt(i);
+      if (c[0] >= minX && c[0] <= maxX && c[1] >= minY && c[1] <= maxY) {
+        const f = new Feature({ geometry: new Point([c[0], c[1]]) });
+        f.set("idx", i, true);
+        f.set("label", src.variantAt(i) < 4 ? `GND-${i}` : `AIR-${i}`);
+        feats.push(f);
+      }
+    }
+    source.clear();
+    source.addFeatures(feats);
+  };
+
+  const reposition = () => {
+    source.forEachFeature((f) => {
+      const i = f.get("idx") as number;
+      const c = src.coordAt(i);
+      (f.getGeometry() as Point).setCoordinates([c[0], c[1]]);
+    });
+  };
+
+  return { layer, update, reposition };
+}
 
 /**
  * WebGL point demo layers for the 1M stress test.
@@ -40,6 +118,10 @@ function pointsStyle(atlas: SymbolAtlas) {
 
 export interface DemoLayer {
   layer: WebGLPointsLayer<VectorSource>;
+  /** Canvas layer holding viewport-gated callsign labels; add above the points layer. */
+  labelLayer: VectorLayer<VectorSource>;
+  /** Refresh labels for the current view (call on moveend). */
+  updateLabels: (extent: Extent, zoom: number) => void;
   /** Begins the animation loop (moving demo only). Returns a no-op when static. */
   start: () => void;
   /** Stops the animation loop and releases the interval. */
@@ -90,8 +172,20 @@ export function buildDemoLayer(count: number, moving: boolean): DemoLayer {
   source.addFeatures(feats);
   console.timeEnd(`🧪 build ${count} demo features`);
 
+  const labels = createLabelController({
+    count: () => count,
+    coordAt: (i) => coordRefs[i],
+    variantAt: (i) => store.variant[i],
+  });
+
   if (!moving) {
-    return { layer, start: () => {}, stop: () => {} };
+    return {
+      layer,
+      labelLayer: labels.layer,
+      updateLabels: labels.update,
+      start: () => {},
+      stop: () => {},
+    };
   }
 
   let timer: ReturnType<typeof setInterval> | null = null;
@@ -112,6 +206,7 @@ export function buildDemoLayer(count: number, moving: boolean): DemoLayer {
     }
     // Single revision bump → exactly one buffer rebuild for the whole batch.
     source.changed();
+    labels.reposition();
 
     const cost = performance.now() - now;
     if (cost > 8) {
@@ -121,6 +216,8 @@ export function buildDemoLayer(count: number, moving: boolean): DemoLayer {
 
   return {
     layer,
+    labelLayer: labels.layer,
+    updateLabels: labels.update,
     start: () => {
       if (timer) return;
       lastMs = 0;
@@ -156,6 +253,13 @@ export function buildServerDrivenLayer(
 
   let worker: Worker | null = null;
   let coordRefs: number[][] = [];
+  let variants: Uint8Array = new Uint8Array(0);
+
+  const labels = createLabelController({
+    count: () => coordRefs.length,
+    coordAt: (i) => coordRefs[i],
+    variantAt: (i) => variants[i] ?? 0,
+  });
 
   const onSnapshot = (data: {
     count: number;
@@ -167,6 +271,7 @@ export function buildServerDrivenLayer(
     const { count, x, y, variant, rot } = data;
     console.time(`🧪 build ${count} server features`);
     source.clear();
+    variants = variant;
     const feats: Feature[] = new Array(count);
     coordRefs = new Array(count);
     for (let i = 0; i < count; i++) {
@@ -191,6 +296,7 @@ export function buildServerDrivenLayer(
       c[1] = y[i];
     }
     source.changed();
+    labels.reposition();
     const cost = performance.now() - now;
     if (cost > 8) {
       console.log(`🛰️ applied ${count} positions in ${cost.toFixed(1)}ms (main thread)`);
@@ -199,6 +305,8 @@ export function buildServerDrivenLayer(
 
   return {
     layer,
+    labelLayer: labels.layer,
+    updateLabels: labels.update,
     start: () => {
       if (worker) return;
       worker = new Worker(

@@ -146,15 +146,31 @@ const MapContainer = memo(function MapContainer({
     militaryLayerRef.current = militaryLayer;
     map.addLayer(militaryLayer);
 
+    // In demo mode, add the viewport-gated label layer and refresh it when the view settles.
+    const demo = demoRef.current;
+    if (demo) {
+      map.addLayer(demo.labelLayer);
+      const view = map.getView();
+      const refreshLabels = () => {
+        const size = map.getSize();
+        if (size) demo.updateLabels(view.calculateExtent(size), view.getZoom() ?? 0);
+      };
+      map.on("moveend", refreshLabels);
+    }
+
     // Apply MapTiler vector style
     apply(
       map,
       "https://api.maptiler.com/maps/019aa851-7005-7219-9be8-65f5e65ce6b4/style.json?key=RxKwgw2F5GydcRbFAqMS",
     )
       .then(() => {
-        // Ensure military layer is on top after base map loads
+        // Ensure the points (and labels) stay on top after the base map loads.
         map.removeLayer(militaryLayer);
         map.addLayer(militaryLayer);
+        if (demo) {
+          map.removeLayer(demo.labelLayer);
+          map.addLayer(demo.labelLayer);
+        }
       })
       .catch((error) => {
         console.error("Error applying MapTiler style:", error);
