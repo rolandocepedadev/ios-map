@@ -8,23 +8,77 @@ import { fromLonLat } from "ol/proj";
 import { defaults as defaultControls } from "ol/control";
 import { apply } from "ol-mapbox-style";
 import VectorLayer from "ol/layer/Vector";
+import WebGLPointsLayer from "ol/layer/WebGLPoints";
 import VectorSource from "ol/source/Vector";
 import Feature from "ol/Feature";
 import Point from "ol/geom/Point";
 import { Style, Icon } from "ol/style";
 import { MilitaryFeature } from "../services/militaryFeatures";
 import { createMilStdIcon } from "../utils/milStd2525";
+import { buildSymbolAtlas } from "../utils/symbolAtlas";
+
+// Spread bounds for the WebGL stress demo (matches the mock data's San Antonio box).
+const DEMO_BOUNDS = { north: 29.7, south: 29.1, east: -98.2, west: -98.8 };
+
+/**
+ * Build a WebGLPointsLayer populated with `count` random static points for the GPU
+ * stress test. All points render from one shared sprite atlas: the per-feature `variant`
+ * attribute picks the atlas cell (icon-offset) and `rot` drives GPU rotation (icon-rotation),
+ * so there is no per-feature style/SVG allocation. This is the Phase-1 proof that the
+ * renderer scales to ~1M; Phase 2 replaces the per-feature Feature objects with a columnar
+ * typed-array store.
+ */
+function createWebGLDemoLayer(
+  source: VectorSource,
+  count: number,
+): WebGLPointsLayer<VectorSource> {
+  const atlas = buildSymbolAtlas();
+  const { west, east, south, north } = DEMO_BOUNDS;
+
+  console.time(`🧪 generate ${count} demo features`);
+  const feats: Feature[] = new Array(count);
+  for (let i = 0; i < count; i++) {
+    const lon = west + Math.random() * (east - west);
+    const lat = south + Math.random() * (north - south);
+    const f = new Feature({ geometry: new Point(fromLonLat([lon, lat])) });
+    f.set("variant", Math.floor(Math.random() * atlas.count), true);
+    f.set("rot", Math.random() * Math.PI * 2, true);
+    feats[i] = f;
+  }
+  source.addFeatures(feats);
+  console.timeEnd(`🧪 generate ${count} demo features`);
+
+  return new WebGLPointsLayer({
+    source,
+    style: {
+      "icon-src": atlas.dataUrl,
+      // Select the atlas cell for this feature; texture size is supplied automatically.
+      "icon-offset": ["array", ["*", ["get", "variant"], atlas.cell], 0],
+      "icon-size": [atlas.cell, atlas.cell],
+      "icon-rotation": ["get", "rot"],
+      "icon-rotate-with-view": false,
+    },
+  });
+}
 
 interface MapContainerProps {
   features: MilitaryFeature[];
+  /**
+   * Phase 1 GPU stress test: when set (via `?scale=N`), render N static points through a
+   * WebGLPointsLayer instead of the Canvas SVG path. Proves the renderer scales to ~1M.
+   */
+  demoScale?: number;
 }
 
 const MapContainer = memo(function MapContainer({
   features,
+  demoScale = 0,
 }: MapContainerProps) {
   const mapRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<Map | null>(null);
-  const militaryLayerRef = useRef<VectorLayer<VectorSource> | null>(null);
+  const militaryLayerRef = useRef<
+    VectorLayer<VectorSource> | WebGLPointsLayer<VectorSource> | null
+  >(null);
   const isInitialized = useRef(false);
 
   // Function to update military features on the map
@@ -85,20 +139,27 @@ const MapContainer = memo(function MapContainer({
     mapInstanceRef.current = map;
     isInitialized.current = true;
 
-    // Create military features layer
+    // Create the military features layer. In demo mode we use a GPU WebGLPointsLayer to
+    // stress-test rendering N static points; otherwise the standard Canvas SVG layer.
     const militarySource = new VectorSource();
-    const militaryLayer = new VectorLayer({
-      source: militarySource,
-      style: (feature) => {
-        const militaryFeature = feature.get("militaryData") as MilitaryFeature;
-        if (!militaryFeature) return new Style();
+    const militaryLayer:
+      | VectorLayer<VectorSource>
+      | WebGLPointsLayer<VectorSource> = demoScale > 0
+      ? createWebGLDemoLayer(militarySource, demoScale)
+      : new VectorLayer({
+          source: militarySource,
+          style: (feature) => {
+            const militaryFeature = feature.get(
+              "militaryData",
+            ) as MilitaryFeature;
+            if (!militaryFeature) return new Style();
 
-        const iconConfig = createMilStdIcon(militaryFeature);
-        return new Style({
-          image: new Icon(iconConfig),
+            const iconConfig = createMilStdIcon(militaryFeature);
+            return new Style({
+              image: new Icon(iconConfig),
+            });
+          },
         });
-      },
-    });
 
     militaryLayerRef.current = militaryLayer;
     map.addLayer(militaryLayer);
@@ -128,15 +189,16 @@ const MapContainer = memo(function MapContainer({
         militaryLayerRef.current = null;
       }
     };
-  }, [updateMilitaryFeatures]); // Include updateMilitaryFeatures in dependencies
+  }, [updateMilitaryFeatures, demoScale]); // demoScale is set once from the URL
 
-  // Update military features when props change
+  // Update military features when props change (skipped in the WebGL demo path)
   useEffect(() => {
+    if (demoScale > 0) return;
     console.log(`🔄 MapContainer received ${features?.length || 0} features`);
     if (features && features.length > 0) {
       updateMilitaryFeatures(features);
     }
-  }, [features, updateMilitaryFeatures]);
+  }, [features, updateMilitaryFeatures, demoScale]);
 
   return (
     <div className="absolute inset-0">

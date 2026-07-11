@@ -11,6 +11,13 @@ import {
 export default function Home() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [isAnimating, setIsAnimating] = useState(false);
+  // Phase 1 GPU stress test: `?scale=N` renders N static points via WebGLPointsLayer.
+  const [demoScale] = useState<number>(() => {
+    if (typeof window === "undefined") return 0;
+    const raw = new URLSearchParams(window.location.search).get("scale");
+    const n = raw ? parseInt(raw, 10) : 0;
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  });
   const [militaryFeatures, setMilitaryFeatures] = useState<MilitaryFeature[]>(
     [],
   );
@@ -37,6 +44,9 @@ export default function Home() {
 
   // Update military features state when they change (WebSocket-driven)
   useEffect(() => {
+    // In GPU demo mode the map self-generates points; skip the live data service.
+    if (demoScale > 0) return;
+
     const updateFeatures = (features: MilitaryFeature[]) => {
       console.log(
         `📡 Main page received ${features.length} features from WebSocket`,
@@ -63,11 +73,11 @@ export default function Home() {
       militaryFeatureService.stopUpdates();
       clearInterval(statusInterval);
     };
-  }, []);
+  }, [demoScale]);
 
   // Calculate statistics
   const stats = {
-    total: militaryFeatures.length,
+    total: demoScale > 0 ? demoScale : militaryFeatures.length,
     tanks: militaryFeatures.filter((f) => f.type === "tank").length,
     aircraft: militaryFeatures.filter((f) => f.type === "aircraft").length,
     friendly: militaryFeatures.filter((f) => f.status === "friendly").length,
@@ -145,7 +155,7 @@ export default function Home() {
 
       <main className="flex-1 relative">
         {/* Full-screen Map Container */}
-        <MapContainer features={militaryFeatures} />
+        <MapContainer features={militaryFeatures} demoScale={demoScale} />
 
         {/* Overlay Sidebar */}
         <div
