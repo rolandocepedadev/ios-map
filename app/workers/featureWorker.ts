@@ -30,7 +30,6 @@ const DEG2RAD = Math.PI / 180;
 let ws: WebSocket | null = null;
 
 // Worker-side SoA copy (Mercator, ready for the renderer).
-let count = 0;
 let mercX = new Float64Array(0);
 let mercY = new Float64Array(0);
 let variant = new Uint8Array(0);
@@ -38,7 +37,6 @@ let rot = new Float32Array(0);
 const idToIndex = new Map<number, number>();
 
 function handleSnapshot(view: DataView, n: number) {
-  count = n;
   mercX = new Float64Array(n);
   mercY = new Float64Array(n);
   variant = new Uint8Array(n);
@@ -75,20 +73,46 @@ function handleSnapshot(view: DataView, n: number) {
 }
 
 function handleDelta(view: DataView, n: number) {
+  // A DELTA frame already carries only the units that moved (server dead-band), so post that
+  // same subset to the main thread — indices + their new positions/rotation — instead of a
+  // full-population copy every tick.
+  const outIdx = new Uint32Array(n);
+  const outX = new Float32Array(n);
+  const outY = new Float32Array(n);
+  const outRot = new Float32Array(n);
+
   let o = HEADER_SIZE;
+  let m = 0;
   for (let k = 0; k < n; k++) {
     const id = view.getUint32(o + OFF_ID, true);
     const idx = idToIndex.get(id);
     if (idx !== undefined) {
-      mercX[idx] = lonToMercatorX(view.getFloat32(o + OFF_LON, true));
-      mercY[idx] = latToMercatorY(view.getFloat32(o + OFF_LAT, true));
+      const mx = lonToMercatorX(view.getFloat32(o + OFF_LON, true));
+      const my = latToMercatorY(view.getFloat32(o + OFF_LAT, true));
+      const r = (view.getUint16(o + OFF_HEADING, true) / HEADING_SCALE) * DEG2RAD;
+      mercX[idx] = mx;
+      mercY[idx] = my;
+      rot[idx] = r;
+      outIdx[m] = idx;
+      outX[m] = mx;
+      outY[m] = my;
+      outRot[m] = r;
+      m++;
     }
     o += RECORD_SIZE;
   }
-  // Post index-aligned positions for the whole population (main applies by index).
-  const x = Float32Array.from(mercX);
-  const y = Float32Array.from(mercY);
-  ctx.postMessage({ type: "positions", count, x, y }, [x.buffer, y.buffer]);
+
+  ctx.postMessage(
+    {
+      type: "positions",
+      count: m,
+      indices: outIdx.subarray(0, m),
+      x: outX.subarray(0, m),
+      y: outY.subarray(0, m),
+      rot: outRot.subarray(0, m),
+    },
+    [outIdx.buffer, outX.buffer, outY.buffer, outRot.buffer],
+  );
 }
 
 function handleFrame(buffer: ArrayBuffer) {
