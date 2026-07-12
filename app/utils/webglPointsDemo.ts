@@ -365,6 +365,7 @@ export function buildServerDrivenLayer(
   });
 
   let worker: Worker | null = null;
+  let feats: Feature[] = [];
   let coordRefs: number[][] = [];
   let variants: Uint8Array = new Uint8Array(0);
 
@@ -388,7 +389,7 @@ export function buildServerDrivenLayer(
     console.time(`🧪 build ${count} server features`);
     source.clear();
     variants = variant;
-    const feats: Feature[] = new Array(count);
+    feats = new Array(count);
     coordRefs = new Array(count);
     for (let i = 0; i < count; i++) {
       const geom = new Point([x[i], y[i]]);
@@ -402,21 +403,32 @@ export function buildServerDrivenLayer(
     console.timeEnd(`🧪 build ${count} server features`);
   };
 
-  const onPositions = (data: { count: number; x: Float32Array; y: Float32Array }) => {
-    const { count, x, y } = data;
-    if (count !== coordRefs.length) return; // ignore until features are built
+  // Apply only the changed subset the worker sent (indices + positions + rotation).
+  const onPositions = (data: {
+    count: number;
+    indices: Uint32Array;
+    x: Float32Array;
+    y: Float32Array;
+    rot: Float32Array;
+  }) => {
+    if (coordRefs.length === 0) return; // ignore until features are built
+    const { count: m, indices, x, y, rot } = data;
     const now = performance.now();
-    for (let i = 0; i < count; i++) {
+    for (let k = 0; k < m; k++) {
+      const i = indices[k];
       const c = coordRefs[i];
-      c[0] = x[i];
-      c[1] = y[i];
+      if (!c) continue;
+      c[0] = x[k];
+      c[1] = y[k];
+      // Non-silent so the WebGLPointsLayer picks up the new rotation on the next rebuild.
+      feats[i].set("rot", rot[k]);
     }
     source.changed();
     labels.reposition();
     selection.reposition();
     const cost = performance.now() - now;
     if (cost > 8) {
-      console.log(`🛰️ applied ${count} positions in ${cost.toFixed(1)}ms (main thread)`);
+      console.log(`🛰️ applied ${m} positions in ${cost.toFixed(1)}ms (main thread)`);
     }
   };
 

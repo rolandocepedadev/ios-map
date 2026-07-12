@@ -96,15 +96,18 @@ export default function Home() {
     };
   }, [demo.ready, demo.scale]);
 
-  // Calculate statistics
+  // Calculate statistics. In demo mode the live array is intentionally empty, so the type/
+  // affiliation breakdown is not meaningful — show a dash rather than a misleading zero.
+  const isDemo = demo.scale > 0;
+  const dash = <T,>(v: T): T | string => (isDemo ? "—" : v);
   const stats = {
-    total: demo.scale > 0 ? demo.scale : militaryFeatures.length,
-    tanks: militaryFeatures.filter((f) => f.type === "tank").length,
-    aircraft: militaryFeatures.filter((f) => f.type === "aircraft").length,
-    friendly: militaryFeatures.filter((f) => f.status === "friendly").length,
-    hostile: militaryFeatures.filter((f) => f.status === "hostile").length,
-    neutral: militaryFeatures.filter((f) => f.status === "neutral").length,
-    unknown: militaryFeatures.filter((f) => f.status === "unknown").length,
+    total: isDemo ? demo.scale : militaryFeatures.length,
+    tanks: dash(militaryFeatures.filter((f) => f.type === "tank").length),
+    aircraft: dash(militaryFeatures.filter((f) => f.type === "aircraft").length),
+    friendly: dash(militaryFeatures.filter((f) => f.status === "friendly").length),
+    hostile: dash(militaryFeatures.filter((f) => f.status === "hostile").length),
+    neutral: dash(militaryFeatures.filter((f) => f.status === "neutral").length),
+    unknown: dash(militaryFeatures.filter((f) => f.status === "unknown").length),
   };
 
   return (

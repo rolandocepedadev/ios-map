@@ -114,17 +114,26 @@ const httpServer = createServer((req, res) => {
 
 const wss = new WebSocketServer({ server: httpServer, path: PATH });
 
+function snapshotBuffer() {
+  return encodeFrame(FRAME_SNAPSHOT, columns(), allIndices);
+}
+
+// Send the current snapshot to every connected client. Used after a (re)initialization so
+// nobody is left applying DELTA frames against a stale/differently-sized population.
+function broadcastSnapshot() {
+  const buf = snapshotBuffer();
+  for (const client of wss.clients) {
+    if (client.readyState === 1) client.send(buf);
+  }
+  console.log(
+    `📦 Broadcast SNAPSHOT to ${wss.clients.size} client(s): ${count} units, ` +
+      `${(buf.byteLength / 1e6).toFixed(2)} MB`,
+  );
+}
+
 wss.on("connection", (ws) => {
   console.log(`🔌 Binary client connected (${wss.clients.size} total)`);
   let initialized = false;
-
-  const sendSnapshot = () => {
-    const buf = encodeFrame(FRAME_SNAPSHOT, columns(), allIndices);
-    ws.send(buf);
-    console.log(
-      `📦 Sent SNAPSHOT: ${count} units, ${(buf.byteLength / 1e6).toFixed(2)} MB`,
-    );
-  };
 
   // The client's first text message requests a population size.
   ws.on("message", (data, isBinary) => {
@@ -134,9 +143,18 @@ wss.on("connection", (ws) => {
       if (msg.op === "hello" && !initialized) {
         initialized = true;
         const requested = Number(msg.count) || DEFAULT_COUNT;
-        // (Re)initialize globally so a single simulation drives all clients.
-        if (count !== Math.min(requested, MAX_COUNT)) initState(requested);
-        sendSnapshot();
+        if (count !== Math.min(requested, MAX_COUNT)) {
+          // Reinit resizes the shared simulation, so re-snapshot ALL clients, not just this
+          // one — otherwise existing clients desync on the next DELTA.
+          initState(requested);
+          broadcastSnapshot();
+        } else {
+          const buf = snapshotBuffer();
+          ws.send(buf);
+          console.log(
+            `📦 Sent SNAPSHOT: ${count} units, ${(buf.byteLength / 1e6).toFixed(2)} MB`,
+          );
+        }
       }
     } catch (err) {
       console.error("❌ Bad client message:", err);
